@@ -2,7 +2,12 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const requiredEnvVars = ['MONGODB_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET'];
+const requiredEnvVars = [
+  'SUPABASE_URL',
+  'SUPABASE_SECRET_KEY',
+  'JWT_SECRET',
+  'JWT_REFRESH_SECRET',
+];
 
 requiredEnvVars.forEach((key) => {
   if (!process.env[key]) {
@@ -13,7 +18,12 @@ requiredEnvVars.forEach((key) => {
 const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT, 10) || 5000,
-  mongodbUri: process.env.MONGODB_URI,
+  supabase: {
+    url: process.env.SUPABASE_URL,
+    publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY,
+    secretKey: process.env.SUPABASE_SECRET_KEY,
+    jwksUrl: process.env.SUPABASE_JWKS_URL,
+  },
   jwt: {
     secret: process.env.JWT_SECRET,
     expiresIn: process.env.JWT_EXPIRES_IN || '15m',

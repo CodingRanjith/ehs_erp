@@ -1,6 +1,7 @@
 import ApiResponse from '../../utils/ApiResponse.js';
 import { AUTH_MESSAGES, COOKIE_NAMES } from '../../utils/constants.js';
 import { asyncHandler, validateRequest, getCookieOptions } from '../../utils/helper.js';
+import { getUserId } from '../../utils/supabaseMapper.js';
 import authService from './auth.service.js';
 
 export const login = asyncHandler(async (req, res) => {
@@ -26,7 +27,7 @@ export const login = asyncHandler(async (req, res) => {
 
 export const logout = asyncHandler(async (req, res) => {
   if (req.user) {
-    await authService.logout(req.user._id);
+    await authService.logout(getUserId(req.user));
   }
 
   res.clearCookie(COOKIE_NAMES.REFRESH_TOKEN, {
@@ -40,7 +41,7 @@ export const logout = asyncHandler(async (req, res) => {
 });
 
 export const getMe = asyncHandler(async (req, res) => {
-  const user = await authService.getProfile(req.user._id);
+  const user = await authService.getProfile(getUserId(req.user));
   res.status(200).json(ApiResponse.success(200, 'Profile fetched', { user }));
 });
 

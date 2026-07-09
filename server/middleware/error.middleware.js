@@ -19,10 +19,15 @@ const errorMiddleware = (err, req, res, next) => {
     message = 'Invalid ID format';
   }
 
-  if (err.code === 11000) {
+  if (err.code === 11000 || err.code === '23505') {
     statusCode = 409;
     const field = Object.keys(err.keyPattern || {})[0] || 'field';
-    message = `${field} already exists`;
+    message = err.code === '23505' ? 'Record already exists' : `${field} already exists`;
+  }
+
+  if (err.code === '22P02') {
+    statusCode = 400;
+    message = 'Invalid ID format';
   }
 
   if (err.name === 'JsonWebTokenError') {

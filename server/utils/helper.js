@@ -1,5 +1,6 @@
 import { validationResult } from 'express-validator';
 import ApiError from './ApiError.js';
+import { mapUserToApi } from './supabaseMapper.js';
 
 export const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
@@ -18,12 +19,7 @@ export const validateRequest = (req) => {
 
 export const sanitizeUser = (user) => {
   if (!user) return null;
-  const userObj = user.toObject ? user.toObject() : { ...user };
-  delete userObj.password;
-  delete userObj.refreshToken;
-  delete userObj.resetPasswordToken;
-  delete userObj.resetPasswordExpires;
-  return userObj;
+  return mapUserToApi(user);
 };
 
 export const getCookieOptions = (rememberMe = false) => {

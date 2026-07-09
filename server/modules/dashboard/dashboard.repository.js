@@ -1,23 +1,18 @@
-import {
-  Enquiry,
-  Project,
-  Payment,
-  Material,
-  Worker,
-  Activity,
-} from './dashboard.models.js';
+import supabase from '../../config/supabase.js';
+import { TABLES } from './dashboard.models.js';
 import {
   PROJECT_STATUS,
   PAYMENT_STATUS,
   WORKER_STATUS,
 } from './dashboard.constants.js';
+import { mapRowToApi, mapRowsToApi, throwIfSupabaseError } from '../../utils/supabaseMapper.js';
 
 const getTodayRange = () => {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
   const end = new Date();
   end.setHours(23, 59, 59, 999);
-  return { start, end };
+  return { start: start.toISOString(), end: end.toISOString() };
 };
 
 const getLastNMonths = (months = 6) => {
@@ -34,9 +29,25 @@ const getLastNMonths = (months = 6) => {
   return result;
 };
 
+const countRows = async (table, filters = []) => {
+  let query = supabase.from(table).select('*', { count: 'exact', head: true });
+
+  filters.forEach(({ method, column, value }) => {
+    query = query[method](column, value);
+  });
+
+  const { count, error } = await query;
+  throwIfSupabaseError(error, `Failed to count ${table}`);
+  return count || 0;
+};
+
+const sumColumn = (rows, column) =>
+  rows.reduce((total, row) => total + Number(row[column] || 0), 0);
+
 class DashboardRepository {
   async getOverviewStats() {
-    const { start: todayStart, end: todayEnd } = getTodayRange();
+    const { start, end } = getTodayRange();
+    const pendingStatuses = [PAYMENT_STATUS.PENDING, PAYMENT_STATUS.PARTIAL, PAYMENT_STATUS.OVERDUE];
 
     const [
       totalEnquiries,
@@ -45,27 +56,33 @@ class DashboardRepository {
       pendingPayments,
       todaysSiteVisits,
       workersAvailable,
-      materialsLowStock,
-      revenueResult,
+      materials,
+      paidPayments,
     ] = await Promise.all([
-      Enquiry.countDocuments(),
-      Project.countDocuments({ status: PROJECT_STATUS.ACTIVE }),
-      Project.countDocuments({ status: PROJECT_STATUS.COMPLETED }),
-      Payment.countDocuments({
-        status: { $in: [PAYMENT_STATUS.PENDING, PAYMENT_STATUS.PARTIAL, PAYMENT_STATUS.OVERDUE] },
-      }),
-      Enquiry.countDocuments({
-        siteVisitDate: { $gte: todayStart, $lte: todayEnd },
-      }),
-      Worker.countDocuments({ status: WORKER_STATUS.AVAILABLE }),
-      Material.countDocuments({
-        $expr: { $lte: ['$quantity', '$minStockLevel'] },
-      }),
-      Payment.aggregate([
-        { $match: { status: PAYMENT_STATUS.PAID } },
-        { $group: { _id: null, total: { $sum: '$paidAmount' } } },
+      countRows(TABLES.ENQUIRIES),
+      countRows(TABLES.PROJECTS, [{ method: 'eq', column: 'status', value: PROJECT_STATUS.ACTIVE }]),
+      countRows(TABLES.PROJECTS, [{ method: 'eq', column: 'status', value: PROJECT_STATUS.COMPLETED }]),
+      countRows(TABLES.PAYMENTS, [{ method: 'in', column: 'status', value: pendingStatuses }]),
+      countRows(TABLES.ENQUIRIES, [
+        { method: 'gte', column: 'site_visit_date', value: start },
+        { method: 'lte', column: 'site_visit_date', value: end },
       ]),
+      countRows(TABLES.WORKERS, [{ method: 'eq', column: 'status', value: WORKER_STATUS.AVAILABLE }]),
+      supabase.from(TABLES.MATERIALS).select('quantity, min_stock_level'),
+      supabase
+        .from(TABLES.PAYMENTS)
+        .select('paid_amount')
+        .eq('status', PAYMENT_STATUS.PAID),
     ]);
+
+    throwIfSupabaseError(materials.error, 'Failed to fetch materials');
+    throwIfSupabaseError(paidPayments.error, 'Failed to fetch paid payments');
+
+    const materialsLowStock = (materials.data || []).filter(
+      (item) => Number(item.quantity) <= Number(item.min_stock_level)
+    ).length;
+
+    const revenue = sumColumn(paidPayments.data || [], 'paid_amount');
 
     return {
       totalEnquiries,
@@ -75,40 +92,30 @@ class DashboardRepository {
       todaysSiteVisits,
       workersAvailable,
       materialsLowStock,
-      revenue: revenueResult[0]?.total || 0,
+      revenue,
     };
   }
 
   async getMonthlyRevenue(months = 6) {
     const monthRange = getLastNMonths(months);
-    const startDate = new Date(monthRange[0].year, monthRange[0].month - 1, 1);
+    const startDate = new Date(monthRange[0].year, monthRange[0].month - 1, 1).toISOString();
 
-    const revenueData = await Payment.aggregate([
-      {
-        $match: {
-          status: PAYMENT_STATUS.PAID,
-          paidDate: { $gte: startDate },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$paidDate' },
-            month: { $month: '$paidDate' },
-          },
-          revenue: { $sum: '$paidAmount' },
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-    ]);
+    const { data, error } = await supabase
+      .from(TABLES.PAYMENTS)
+      .select('paid_amount, paid_date')
+      .eq('status', PAYMENT_STATUS.PAID)
+      .gte('paid_date', startDate);
 
-    const revenueMap = new Map(
-      revenueData.map((item) => [
-        `${item._id.year}-${item._id.month}`,
-        item.revenue,
-      ])
-    );
+    throwIfSupabaseError(error, 'Failed to fetch monthly revenue');
+
+    const revenueMap = new Map();
+
+    (data || []).forEach((payment) => {
+      if (!payment.paid_date) return;
+      const paidDate = new Date(payment.paid_date);
+      const key = `${paidDate.getFullYear()}-${paidDate.getMonth() + 1}`;
+      revenueMap.set(key, (revenueMap.get(key) || 0) + Number(payment.paid_amount || 0));
+    });
 
     return monthRange.map(({ year, month, label }) => ({
       month: label,
@@ -117,85 +124,82 @@ class DashboardRepository {
   }
 
   async getProjectStatusChart() {
-    const data = await Project.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { count: -1 } },
-    ]);
+    const { data, error } = await supabase.from(TABLES.PROJECTS).select('status');
+    throwIfSupabaseError(error, 'Failed to fetch project status chart');
 
-    return data.map((item) => ({
-      status: item._id,
-      count: item.count,
-    }));
+    const statusMap = new Map();
+    (data || []).forEach((project) => {
+      statusMap.set(project.status, (statusMap.get(project.status) || 0) + 1);
+    });
+
+    return Array.from(statusMap.entries())
+      .map(([status, count]) => ({ status, count }))
+      .sort((a, b) => b.count - a.count);
   }
 
   async getPaymentStatusChart() {
-    const data = await Payment.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 },
-          amount: { $sum: '$amount' },
-        },
-      },
-      { $sort: { count: -1 } },
-    ]);
+    const { data, error } = await supabase.from(TABLES.PAYMENTS).select('status, amount');
+    throwIfSupabaseError(error, 'Failed to fetch payment status chart');
 
-    return data.map((item) => ({
-      status: item._id,
-      count: item.count,
-      amount: item.amount,
-    }));
+    const statusMap = new Map();
+    (data || []).forEach((payment) => {
+      const current = statusMap.get(payment.status) || { count: 0, amount: 0 };
+      current.count += 1;
+      current.amount += Number(payment.amount || 0);
+      statusMap.set(payment.status, current);
+    });
+
+    return Array.from(statusMap.entries())
+      .map(([status, values]) => ({ status, count: values.count, amount: values.amount }))
+      .sort((a, b) => b.count - a.count);
   }
 
   async getRecentEnquiries(limit = 5) {
-    return Enquiry.find()
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .select('enquiryNumber customerName phone status source siteVisitDate createdAt')
-      .lean();
+    const { data, error } = await supabase
+      .from(TABLES.ENQUIRIES)
+      .select('id, enquiry_number, customer_name, phone, status, source, site_visit_date, created_at')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    throwIfSupabaseError(error, 'Failed to fetch recent enquiries');
+    return mapRowsToApi(data);
   }
 
   async getRecentProjects(limit = 5) {
-    return Project.find()
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .select('projectNumber title customerName status estimatedValue startDate createdAt')
-      .lean();
+    const { data, error } = await supabase
+      .from(TABLES.PROJECTS)
+      .select('id, project_number, title, customer_name, status, estimated_value, start_date, created_at')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    throwIfSupabaseError(error, 'Failed to fetch recent projects');
+    return mapRowsToApi(data);
   }
 
   async getRecentActivities(limit = 10) {
-    const activities = await Activity.find()
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .select('type title description module createdAt')
-      .lean();
+    const { data, error } = await supabase
+      .from(TABLES.ACTIVITIES)
+      .select('id, type, title, description, module, created_at')
+      .order('created_at', { ascending: false })
+      .limit(limit);
 
-    if (activities.length > 0) {
-      return activities;
+    throwIfSupabaseError(error, 'Failed to fetch recent activities');
+
+    if ((data || []).length > 0) {
+      return mapRowsToApi(data);
     }
 
     const [recentEnquiries, recentProjects, recentPayments] = await Promise.all([
-      Enquiry.find()
-        .sort({ createdAt: -1 })
-        .limit(4)
-        .select('enquiryNumber customerName status createdAt')
-        .lean(),
-      Project.find()
-        .sort({ createdAt: -1 })
-        .limit(3)
-        .select('projectNumber title status createdAt')
-        .lean(),
-      Payment.find()
-        .sort({ createdAt: -1 })
-        .limit(3)
-        .select('paymentNumber amount status createdAt')
-        .lean(),
+      this.getRecentEnquiries(4),
+      this.getRecentProjects(3),
+      supabase
+        .from(TABLES.PAYMENTS)
+        .select('id, payment_number, amount, status, created_at')
+        .order('created_at', { ascending: false })
+        .limit(3),
     ]);
+
+    throwIfSupabaseError(recentPayments.error, 'Failed to fetch recent payments');
 
     const derived = [
       ...recentEnquiries.map((e) => ({
@@ -214,11 +218,11 @@ class DashboardRepository {
         module: 'project',
         createdAt: p.createdAt,
       })),
-      ...recentPayments.map((pay) => ({
+      ...mapRowsToApi(recentPayments.data).map((pay) => ({
         _id: pay._id,
         type: 'payment',
         title: `Payment ${pay.paymentNumber}`,
-        description: `₹${pay.amount?.toLocaleString('en-IN')} - ${pay.status}`,
+        description: `₹${Number(pay.amount || 0).toLocaleString('en-IN')} - ${pay.status}`,
         module: 'payment',
         createdAt: pay.createdAt,
       })),
@@ -230,21 +234,17 @@ class DashboardRepository {
   }
 
   async getPendingPaymentsAmount() {
-    const result = await Payment.aggregate([
-      {
-        $match: {
-          status: { $in: [PAYMENT_STATUS.PENDING, PAYMENT_STATUS.PARTIAL, PAYMENT_STATUS.OVERDUE] },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: { $subtract: ['$amount', '$paidAmount'] } },
-        },
-      },
-    ]);
+    const { data, error } = await supabase
+      .from(TABLES.PAYMENTS)
+      .select('amount, paid_amount, status')
+      .in('status', [PAYMENT_STATUS.PENDING, PAYMENT_STATUS.PARTIAL, PAYMENT_STATUS.OVERDUE]);
 
-    return result[0]?.total || 0;
+    throwIfSupabaseError(error, 'Failed to fetch pending payments amount');
+
+    return (data || []).reduce(
+      (total, payment) => total + (Number(payment.amount || 0) - Number(payment.paid_amount || 0)),
+      0
+    );
   }
 }
 

@@ -1,32 +1,41 @@
 import dotenv from 'dotenv';
-import mongoose from 'mongoose';
-import User from '../modules/auth/auth.model.js';
+import supabase from '../config/supabase.js';
+import { TABLES } from '../modules/auth/auth.model.js';
 import { ROLES } from '../utils/constants.js';
+import { hashPassword } from '../utils/password.js';
+import { throwIfSupabaseError } from '../utils/supabaseMapper.js';
 
 dotenv.config();
 
 const seedAdmin = async () => {
   try {
-    await mongoose.connect(process.env.MONGODB_URI);
-    console.log('Connected to MongoDB');
-
-    const adminEmail = process.env.ADMIN_EMAIL || 'admin@ehs.com';
+    const adminEmail = (process.env.ADMIN_EMAIL || 'admin@ehs.com').toLowerCase();
     const adminPassword = process.env.ADMIN_PASSWORD || 'Admin@123';
 
-    const existingAdmin = await User.findOne({ email: adminEmail });
+    const { data: existingAdmin, error: findError } = await supabase
+      .from(TABLES.USERS)
+      .select('id, email')
+      .eq('email', adminEmail)
+      .maybeSingle();
+
+    throwIfSupabaseError(findError, 'Failed to check existing admin');
 
     if (existingAdmin) {
       console.log('Admin user already exists:', adminEmail);
       process.exit(0);
     }
 
-    await User.create({
+    const hashedPassword = await hashPassword(adminPassword);
+
+    const { error } = await supabase.from(TABLES.USERS).insert({
       name: 'System Admin',
       email: adminEmail,
-      password: adminPassword,
+      password: hashedPassword,
       role: ROLES.ADMIN,
-      isActive: true,
+      is_active: true,
     });
+
+    throwIfSupabaseError(error, 'Failed to create admin user');
 
     console.log('Admin user created successfully');
     console.log(`Email: ${adminEmail}`);

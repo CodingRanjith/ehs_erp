@@ -2,7 +2,7 @@ import jwt from 'jsonwebtoken';
 import ApiError from '../utils/ApiError.js';
 import { AUTH_MESSAGES } from '../utils/constants.js';
 import jwtConfig from '../config/jwt.js';
-import User from '../modules/auth/auth.model.js';
+import authRepository from '../modules/auth/auth.repository.js';
 import { asyncHandler } from '../utils/helper.js';
 
 export const authenticate = asyncHandler(async (req, res, next) => {
@@ -16,17 +16,17 @@ export const authenticate = asyncHandler(async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, jwtConfig.access.secret);
-    const user = await User.findById(decoded.id).select('-password -refreshToken');
+    const user = await authRepository.findById(decoded.id);
 
     if (!user) {
       throw ApiError.unauthorized(AUTH_MESSAGES.USER_NOT_FOUND);
     }
 
-    if (!user.isActive) {
+    if (!user.is_active) {
       throw ApiError.forbidden(AUTH_MESSAGES.ACCOUNT_INACTIVE);
     }
 
-    req.user = user;
+    req.user = authRepository.toApiUser(user);
     next();
   } catch (error) {
     if (error.name === 'TokenExpiredError') {

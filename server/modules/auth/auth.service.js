@@ -7,9 +7,11 @@ import {
   hashToken,
   verifyRefreshToken,
 } from '../../utils/generateToken.js';
-import { sanitizeUser } from '../../utils/helper.js';
+import { comparePassword } from '../../utils/password.js';
 import authRepository from './auth.repository.js';
 import { sendPasswordResetEmail } from '../../services/email.service.js';
+
+const sanitizeUser = (user) => authRepository.toApiUser(user);
 
 class AuthService {
   async login({ email, password, rememberMe = false }) {
@@ -19,22 +21,23 @@ class AuthService {
       throw ApiError.unauthorized(AUTH_MESSAGES.INVALID_CREDENTIALS);
     }
 
-    if (!user.isActive) {
+    if (!user.is_active) {
       throw ApiError.forbidden(AUTH_MESSAGES.ACCOUNT_INACTIVE);
     }
 
-    const isPasswordValid = await user.comparePassword(password);
+    const isPasswordValid = await comparePassword(password, user.password);
 
     if (!isPasswordValid) {
       throw ApiError.unauthorized(AUTH_MESSAGES.INVALID_CREDENTIALS);
     }
 
-    const tokenPayload = { id: user._id, role: user.role, email: user.email };
+    const userId = user.id;
+    const tokenPayload = { id: userId, role: user.role, email: user.email };
     const accessToken = generateAccessToken(tokenPayload);
     const refreshToken = generateRefreshToken(tokenPayload, rememberMe);
 
-    await authRepository.updateRefreshToken(user._id, refreshToken);
-    await authRepository.updateLastLogin(user._id);
+    await authRepository.updateRefreshToken(userId, refreshToken);
+    await authRepository.updateLastLogin(userId);
 
     return {
       user: sanitizeUser(user),
@@ -73,15 +76,15 @@ class AuthService {
 
     const user = await authRepository.findById(decoded.id, true);
 
-    if (!user || user.refreshToken !== refreshToken) {
+    if (!user || user.refresh_token !== refreshToken) {
       throw ApiError.unauthorized(AUTH_MESSAGES.TOKEN_INVALID);
     }
 
-    if (!user.isActive) {
+    if (!user.is_active) {
       throw ApiError.forbidden(AUTH_MESSAGES.ACCOUNT_INACTIVE);
     }
 
-    const tokenPayload = { id: user._id, role: user.role, email: user.email };
+    const tokenPayload = { id: user.id, role: user.role, email: user.email };
     const accessToken = generateAccessToken(tokenPayload);
 
     return { accessToken, user: sanitizeUser(user) };
@@ -97,7 +100,7 @@ class AuthService {
     const { resetToken, hashedToken } = generateResetToken();
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
-    await authRepository.setResetToken(user._id, hashedToken, expiresAt);
+    await authRepository.setResetToken(user.id, hashedToken, expiresAt);
     await sendPasswordResetEmail(user.email, resetToken);
 
     return { message: AUTH_MESSAGES.PASSWORD_RESET_SENT };
@@ -111,11 +114,12 @@ class AuthService {
       throw ApiError.badRequest(AUTH_MESSAGES.INVALID_RESET_TOKEN);
     }
 
-    user.password = password;
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpires = undefined;
-    user.refreshToken = null;
-    await user.save();
+    await authRepository.updateById(user.id, {
+      password,
+      resetPasswordToken: null,
+      resetPasswordExpires: null,
+      refreshToken: null,
+    });
 
     return { message: AUTH_MESSAGES.PASSWORD_RESET_SUCCESS };
   }
